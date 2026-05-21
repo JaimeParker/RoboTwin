@@ -1494,6 +1494,10 @@ class Base_Task(gym.Env):
 
     def take_action(self, action, action_type:Literal['qpos', 'ee']='qpos'):  # action_type: qpos or ee
         if self.take_action_cnt == self.step_lim or self.eval_success:
+            _coordinator = getattr(self, '_topp_ctrl_coordinator', None)
+            if _coordinator is not None:
+                _coordinator.pre_topp()
+                _coordinator.pre_ctrl()
             return
 
         if self._step_timer is not None:
@@ -1548,6 +1552,10 @@ class Base_Task(gym.Env):
 
         if self._step_timer is not None:
             self._step_timer.lap("prep")
+
+        _coordinator = getattr(self, '_topp_ctrl_coordinator', None)
+        if _coordinator is not None:
+            _coordinator.pre_topp()
 
         if action_type == 'qpos':
             left_current_qpos, right_current_qpos = (
@@ -1619,6 +1627,9 @@ class Base_Task(gym.Env):
                 right_n_step = right_result["position"].shape[0]
                 topp_right_flag = True
 
+        if _coordinator is not None:
+            _coordinator.pre_ctrl()
+
         if self.control_step_cap is not None:
             if topp_left_flag:
                 left_result, left_n_step = self._cap_arm_trajectory(left_result, left_n_step)
@@ -1674,8 +1685,7 @@ class Base_Task(gym.Env):
         # _ctrl_gate is an optional threading.Semaphore installed by rl-garden
         # to serialise scene.step() across parallel envs and avoid GPU thundering
         # herd.  When None (default), behaviour is unchanged.
-        _ctrl_gate = getattr(self, '_ctrl_gate', None)
-        import os as _os; print(f"[CTRL_GATE_DBG] pid={_os.getpid()} gate={_ctrl_gate}", flush=True)
+        _ctrl_gate = None if _coordinator is not None else getattr(self, '_ctrl_gate', None)
         if _ctrl_gate is not None:
             _ctrl_gate.acquire()
         try:
