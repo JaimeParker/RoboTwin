@@ -1671,45 +1671,55 @@ class Base_Task(gym.Env):
             self._step_timer.lap("ctrl")
 
         # ========== Control Loop ==========
-        while now_left_id < left_n_step or now_right_id < right_n_step:
+        # _ctrl_gate is an optional threading.Semaphore installed by rl-garden
+        # to serialise scene.step() across parallel envs and avoid GPU thundering
+        # herd.  When None (default), behaviour is unchanged.
+        _ctrl_gate = getattr(self, '_ctrl_gate', None)
+        if _ctrl_gate is not None:
+            _ctrl_gate.acquire()
+        try:
+            while now_left_id < left_n_step or now_right_id < right_n_step:
 
-            if (now_left_id < left_n_step and now_left_id / left_n_step <= now_right_id / right_n_step):
-                if topp_left_flag:
-                    self.robot.set_arm_joints(
-                        left_result["position"][now_left_id],
-                        left_result["velocity"][now_left_id],
-                        "left",
-                    )
-                self.robot.set_gripper(left_gripper[now_left_id], "left")
+                if (now_left_id < left_n_step and now_left_id / left_n_step <= now_right_id / right_n_step):
+                    if topp_left_flag:
+                        self.robot.set_arm_joints(
+                            left_result["position"][now_left_id],
+                            left_result["velocity"][now_left_id],
+                            "left",
+                        )
+                    self.robot.set_gripper(left_gripper[now_left_id], "left")
 
-                now_left_id += 1
+                    now_left_id += 1
 
-            if (now_right_id < right_n_step and now_right_id / right_n_step <= now_left_id / left_n_step):
-                if topp_right_flag:
-                    self.robot.set_arm_joints(
-                        right_result["position"][now_right_id],
-                        right_result["velocity"][now_right_id],
-                        "right",
-                    )
-                self.robot.set_gripper(right_gripper[now_right_id], "right")
+                if (now_right_id < right_n_step and now_right_id / right_n_step <= now_left_id / left_n_step):
+                    if topp_right_flag:
+                        self.robot.set_arm_joints(
+                            right_result["position"][now_right_id],
+                            right_result["velocity"][now_right_id],
+                            "right",
+                        )
+                    self.robot.set_gripper(right_gripper[now_right_id], "right")
 
-                now_right_id += 1
+                    now_right_id += 1
 
-            self.scene.step()
-            self._mark_render_dirty()
-            if self.render_every_control_step:
-                self._ensure_render_updated()
-                
-            if self.check_success():
-                self.eval_success = True
-                if self._step_timer is not None:
-                    self._step_timer.lap("obs")
-                self.get_obs() # update obs
-                if (self.eval_video_path is not None):
-                    self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
-                if self._step_timer is not None:
-                    self._step_timer.stop()
-                return
+                self.scene.step()
+                self._mark_render_dirty()
+                if self.render_every_control_step:
+                    self._ensure_render_updated()
+
+                if self.check_success():
+                    self.eval_success = True
+                    if self._step_timer is not None:
+                        self._step_timer.lap("obs")
+                    self.get_obs() # update obs
+                    if (self.eval_video_path is not None):
+                        self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
+                    if self._step_timer is not None:
+                        self._step_timer.stop()
+                    return
+        finally:
+            if _ctrl_gate is not None:
+                _ctrl_gate.release()
 
         if self._step_timer is not None:
             self._step_timer.lap("render")
