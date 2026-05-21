@@ -65,6 +65,12 @@ class Base_Task(gym.Env):
         self.save_dir = kwags.get("save_path", "data")
         self.ep_num = kwags.get("now_ep_num", 0)
         self.render_freq = kwags.get("render_freq", 10)
+        self.render_every_control_step = kwags.get("render_every_control_step", False)
+        control_step_cap = kwags.get("control_step_cap", None)
+        self.control_step_cap = int(control_step_cap) if control_step_cap else None
+        if self.control_step_cap is not None and self.control_step_cap <= 0:
+            self.control_step_cap = None
+        self._render_dirty = True
         self.data_type = kwags.get("data_type", None)
         self.save_data = kwags.get("save_data", False)
         self.dual_arm = kwags.get("dual_arm", True)
@@ -432,11 +438,19 @@ class Base_Task(gym.Env):
             self.scene.set_ambient_light(now_ambient_light)
         self.cameras.update_wrist_camera(self.robot.left_camera.get_pose(), self.robot.right_camera.get_pose())
         self.scene.update_render()
+        self._render_dirty = False
+
+    def _mark_render_dirty(self):
+        self._render_dirty = True
+
+    def _ensure_render_updated(self):
+        if self._render_dirty:
+            self._update_render()
 
     # =========================================================== Basic APIs ===========================================================
 
     def get_obs(self):
-        self._update_render()
+        self._ensure_render_updated()
         self.cameras.update_picture()
         pkl_dic = {
             "observation": {},
@@ -501,7 +515,7 @@ class Base_Task(gym.Env):
         return pkl_dic
 
     def save_camera_rgb(self, save_path, camera_name='head_camera'):
-        self._update_render()
+        self._ensure_render_updated()
         self.cameras.update_picture()
         rgb = self.cameras.get_rgb()
         save_img(save_path, rgb[camera_name]['rgb'])
@@ -1463,13 +1477,14 @@ class Base_Task(gym.Env):
                 )  # TODO
 
             self.scene.step()
+            self._mark_render_dirty()
 
             if self.render_freq and control_idx % self.render_freq == 0:
-                self._update_render()
+                self._ensure_render_updated()
                 self.viewer.render()
 
             if save_freq != None and control_idx % save_freq == 0:
-                self._update_render()
+                self._ensure_render_updated()
                 self._take_picture()
 
         if save_freq != None:
@@ -1491,8 +1506,8 @@ class Base_Task(gym.Env):
         self.take_action_cnt += 1
         print(f"step: \033[92m{self.take_action_cnt} / {self.step_lim}\033[0m", end="\r")
 
-        self._update_render()
         if self.render_freq:
+            self._ensure_render_updated()
             self.viewer.render()
 
         actions = np.array([action])
@@ -1604,6 +1619,16 @@ class Base_Task(gym.Env):
                 right_n_step = right_result["position"].shape[0]
                 topp_right_flag = True
 
+        if self.control_step_cap is not None:
+            if topp_left_flag:
+                left_result, left_n_step = self._cap_arm_trajectory(left_result, left_n_step)
+            else:
+                left_n_step = min(left_n_step, self.control_step_cap)
+            if topp_right_flag:
+                right_result, right_n_step = self._cap_arm_trajectory(right_result, right_n_step)
+            else:
+                right_n_step = min(right_n_step, self.control_step_cap)
+
         if self._step_timer is not None:
             self._step_timer.lap("gripper")
 
@@ -1671,7 +1696,9 @@ class Base_Task(gym.Env):
                 now_right_id += 1
 
             self.scene.step()
-            self._update_render()
+            self._mark_render_dirty()
+            if self.render_every_control_step:
+                self._ensure_render_updated()
                 
             if self.check_success():
                 self.eval_success = True
@@ -1686,11 +1713,20 @@ class Base_Task(gym.Env):
 
         if self._step_timer is not None:
             self._step_timer.lap("render")
-        self._update_render()
+        self._ensure_render_updated()
         if self.render_freq:  # UI
             self.viewer.render()
         if self._step_timer is not None:
             self._step_timer.stop()
+
+    def _cap_arm_trajectory(self, result, n_step):
+        if self.control_step_cap is None or n_step <= self.control_step_cap:
+            return result, n_step
+        indices = np.linspace(0, n_step - 1, self.control_step_cap).round().astype(np.int64)
+        capped = dict(result)
+        capped["position"] = result["position"][indices]
+        capped["velocity"] = result["velocity"][indices]
+        return capped, capped["position"].shape[0]
 
 
     def save_camera_images(self, task_name, step_name, generate_num_id, save_dir="./camera_images"):
