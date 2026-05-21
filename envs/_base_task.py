@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import sapien.core as sapien
 from sapien.render import clear_cache as sapien_clear_cache
 from sapien.utils.viewer import Viewer
@@ -36,7 +37,7 @@ parent_directory = os.path.dirname(current_file_path)
 class Base_Task(gym.Env):
 
     def __init__(self):
-        pass
+        self._step_timer = None
 
     # =========================================================== Init Task Env ===========================================================
     def _init_task_env_(self, table_xy_bias=[0, 0], table_height_bias=0, **kwags):
@@ -1480,6 +1481,9 @@ class Base_Task(gym.Env):
         if self.take_action_cnt == self.step_lim or self.eval_success:
             return
 
+        if self._step_timer is not None:
+            self._step_timer.start()
+
         eval_video_freq = 1  # fixed
         if (self.eval_video_path is not None and self.take_action_cnt % eval_video_freq == 0):
             self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
@@ -1527,6 +1531,9 @@ class Base_Task(gym.Env):
         left_gripper_path = np.hstack((left_current_gripper, left_gripper_actions))
         right_gripper_path = np.hstack((right_current_gripper, right_gripper_actions))
 
+        if self._step_timer is not None:
+            self._step_timer.lap("prep")
+
         if action_type == 'qpos':
             left_current_qpos, right_current_qpos = (
                 current_jointstate[:left_arm_dim],
@@ -1539,6 +1546,8 @@ class Base_Task(gym.Env):
             # TODO
             topp_left_flag, topp_right_flag = True, True
 
+            if self._step_timer is not None:
+                self._step_timer.lap("topp_l")
             try:
                 times, left_pos, left_vel, acc, duration = (self.robot.left_mplib_planner.TOPP(left_path,
                                                                                             1 / 250,
@@ -1555,6 +1564,8 @@ class Base_Task(gym.Env):
                 topp_left_flag = False
                 left_n_step = 50  # fixed
 
+            if self._step_timer is not None:
+                self._step_timer.lap("topp_r")
             try:
                 times, right_pos, right_vel, acc, duration = (self.robot.right_mplib_planner.TOPP(right_path,
                                                                                                 1 / 250,
@@ -1573,23 +1584,28 @@ class Base_Task(gym.Env):
         
         elif action_type == 'ee':
 
+            if self._step_timer is not None:
+                self._step_timer.lap("plan_l")
             left_result = self.robot.left_plan_path(left_arm_actions[0])
             right_result = self.robot.right_plan_path(right_arm_actions[0])
             if left_result["status"] != "Success":
                 left_n_step = 50
                 topp_left_flag = False
-                # print("left fail")
-            else: 
+            else:
                 left_n_step = left_result["position"].shape[0]
                 topp_left_flag = True
-            
+
+            if self._step_timer is not None:
+                self._step_timer.lap("plan_r")
             if right_result["status"] != "Success":
                 right_n_step = 50
                 topp_right_flag = False
-                # print("right fail")
             else:
                 right_n_step = right_result["position"].shape[0]
                 topp_right_flag = True
+
+        if self._step_timer is not None:
+            self._step_timer.lap("gripper")
 
         # ========== Gripper ==========
 
@@ -1626,6 +1642,9 @@ class Base_Task(gym.Env):
 
         now_left_id, now_right_id = 0, 0
 
+        if self._step_timer is not None:
+            self._step_timer.lap("ctrl")
+
         # ========== Control Loop ==========
         while now_left_id < left_n_step or now_right_id < right_n_step:
 
@@ -1656,14 +1675,22 @@ class Base_Task(gym.Env):
                 
             if self.check_success():
                 self.eval_success = True
+                if self._step_timer is not None:
+                    self._step_timer.lap("obs")
                 self.get_obs() # update obs
                 if (self.eval_video_path is not None):
                     self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
+                if self._step_timer is not None:
+                    self._step_timer.stop()
                 return
 
+        if self._step_timer is not None:
+            self._step_timer.lap("render")
         self._update_render()
         if self.render_freq:  # UI
             self.viewer.render()
+        if self._step_timer is not None:
+            self._step_timer.stop()
 
 
     def save_camera_images(self, task_name, step_name, generate_num_id, save_dir="./camera_images"):
