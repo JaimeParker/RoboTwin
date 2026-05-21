@@ -1675,6 +1675,7 @@ class Base_Task(gym.Env):
         # to serialise scene.step() across parallel envs and avoid GPU thundering
         # herd.  When None (default), behaviour is unchanged.
         _ctrl_gate = getattr(self, '_ctrl_gate', None)
+        import os as _os; print(f"[CTRL_GATE_DBG] pid={_os.getpid()} gate={_ctrl_gate}", flush=True)
         if _ctrl_gate is not None:
             _ctrl_gate.acquire()
         try:
