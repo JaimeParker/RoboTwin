@@ -76,7 +76,7 @@ class Base_Task(gym.Env):
         self.dual_arm = kwags.get("dual_arm", True)
         self.eval_mode = kwags.get("eval_mode", False)
 
-        self.need_topp = True  # TODO
+        self.need_topp = kwags.get("need_topp", True)
 
         # Random
         random_setting = kwags.get("domain_randomization")
@@ -392,12 +392,14 @@ class Base_Task(gym.Env):
         """
         load aloha robot urdf file, set root pose and set joints
         """
+        robot_kwargs = dict(kwags)
+        robot_kwargs.pop("need_topp", None)
         if not hasattr(self, "robot"):
-            self.robot = Robot(self.scene, self.need_topp, **kwags)
+            self.robot = Robot(self.scene, self.need_topp, **robot_kwargs)
             self.robot.set_planner(self.scene)
             self.robot.init_joints()
         else:
-            self.robot.reset(self.scene, self.need_topp, **kwags)
+            self.robot.reset(self.scene, self.need_topp, **robot_kwargs)
 
         for link in self.robot.left_entity.get_links():
             link: sapien.physx.PhysxArticulationLinkComponent = link
@@ -1566,44 +1568,76 @@ class Base_Task(gym.Env):
             right_path = np.vstack((right_current_qpos, right_arm_actions))
 
             # ========== TOPP ==========
-            # TODO
             topp_left_flag, topp_right_flag = True, True
-
-            if self._step_timer is not None:
-                self._step_timer.lap("topp_l")
-            try:
-                times, left_pos, left_vel, acc, duration = (self.robot.left_mplib_planner.TOPP(left_path,
-                                                                                            1 / 250,
-                                                                                            verbose=True))
-                left_result = dict()
-                left_result["position"], left_result["velocity"] = left_pos, left_vel
-                left_n_step = left_result["position"].shape[0]
-            except Exception as e:
-                # print("left arm TOPP error: ", e)
-                topp_left_flag = False
-                left_n_step = 50  # fixed
-
-            if left_n_step == 0:
-                topp_left_flag = False
-                left_n_step = 50  # fixed
-
-            if self._step_timer is not None:
-                self._step_timer.lap("topp_r")
-            try:
-                times, right_pos, right_vel, acc, duration = (self.robot.right_mplib_planner.TOPP(right_path,
+            if self.need_topp:
+                if self._step_timer is not None:
+                    self._step_timer.lap("topp_l")
+                try:
+                    times, left_pos, left_vel, acc, duration = (self.robot.left_mplib_planner.TOPP(left_path,
                                                                                                 1 / 250,
                                                                                                 verbose=True))
-                right_result = dict()
-                right_result["position"], right_result["velocity"] = right_pos, right_vel
-                right_n_step = right_result["position"].shape[0]
-            except Exception as e:
-                # print("right arm TOPP error: ", e)
-                topp_right_flag = False
-                right_n_step = 50  # fixed
+                    left_result = dict()
+                    left_result["position"], left_result["velocity"] = left_pos, left_vel
+                    left_n_step = left_result["position"].shape[0]
+                except Exception as e:
+                    # print("left arm TOPP error: ", e)
+                    topp_left_flag = False
+                    left_n_step = 50  # fixed
 
-            if right_n_step == 0:
-                topp_right_flag = False
-                right_n_step = 50  # fixed
+                if left_n_step == 0:
+                    topp_left_flag = False
+                    left_n_step = 50  # fixed
+
+                if self._step_timer is not None:
+                    self._step_timer.lap("topp_r")
+                try:
+                    times, right_pos, right_vel, acc, duration = (self.robot.right_mplib_planner.TOPP(right_path,
+                                                                                                    1 / 250,
+                                                                                                    verbose=True))
+                    right_result = dict()
+                    right_result["position"], right_result["velocity"] = right_pos, right_vel
+                    right_n_step = right_result["position"].shape[0]
+                except Exception as e:
+                    # print("right arm TOPP error: ", e)
+                    topp_right_flag = False
+                    right_n_step = 50  # fixed
+
+                if right_n_step == 0:
+                    topp_right_flag = False
+                    right_n_step = 50  # fixed
+            else:
+                interp_steps = self.control_step_cap if self.control_step_cap is not None else 1
+                interp_steps = max(int(interp_steps), 1)
+
+                left_target_qpos = left_arm_actions[-1]
+                right_target_qpos = right_arm_actions[-1]
+
+                left_pos = np.linspace(
+                    left_current_qpos,
+                    left_target_qpos,
+                    interp_steps + 1,
+                    dtype=np.float32,
+                )[1:]
+                right_pos = np.linspace(
+                    right_current_qpos,
+                    right_target_qpos,
+                    interp_steps + 1,
+                    dtype=np.float32,
+                )[1:]
+
+                left_result = {
+                    "position": left_pos,
+                    "velocity": np.zeros_like(left_pos, dtype=np.float32),
+                }
+                right_result = {
+                    "position": right_pos,
+                    "velocity": np.zeros_like(right_pos, dtype=np.float32),
+                }
+                left_n_step = left_result["position"].shape[0]
+                right_n_step = right_result["position"].shape[0]
+                if self._step_timer is not None:
+                    self._step_timer.lap("topp_l")
+                    self._step_timer.lap("topp_r")
         
         elif action_type == 'ee':
 
@@ -1679,15 +1713,17 @@ class Base_Task(gym.Env):
         now_left_id, now_right_id = 0, 0
 
         if self._step_timer is not None:
-            self._step_timer.lap("ctrl")
+            self._step_timer.lap("ctrl_wait")
 
         # ========== Control Loop ==========
         # _ctrl_gate is an optional threading.Semaphore installed by rl-garden
         # to serialise scene.step() across parallel envs and avoid GPU thundering
         # herd.  When None (default), behaviour is unchanged.
-        _ctrl_gate = None if _coordinator is not None else getattr(self, '_ctrl_gate', None)
+        _ctrl_gate = getattr(self, '_ctrl_gate', None)
         if _ctrl_gate is not None:
             _ctrl_gate.acquire()
+        if self._step_timer is not None:
+            self._step_timer.lap("ctrl")
         try:
             while now_left_id < left_n_step or now_right_id < right_n_step:
 
